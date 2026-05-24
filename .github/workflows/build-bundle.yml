@@ -1,0 +1,352 @@
+name: Build Bundle
+
+on:
+  schedule:
+    # 每天 UTC 2:00 (北京时间 10:00) 检查新版本
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      cc_version:
+        description: '强制指定 Claude Code 版本 (留空则用最新版)'
+        required: false
+        default: ''
+      node_version:
+        description: 'Node.js 版本 (留空则用 LTS)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      cc_version: ${{ steps.version.outputs.cc_version }}
+      node_version: ${{ steps.version.outputs.node_version }}
+      should_build: ${{ steps.version.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+
+      - name: Determine versions
+        id: version
+        run: |
+          # Claude Code 版本
+          if [ -n "${{ github.event.inputs.cc_version }}" ]; then
+            CC_VERSION="${{ github.event.inputs.cc_version }}"
+          else
+            CC_VERSION=$(npm view @anthropic-ai/claude-code version 2>/dev/null || echo "")
+          fi
+
+          if [ -z "$CC_VERSION" ]; then
+            echo "Failed to get CC version"
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "CC version: $CC_VERSION"
+          echo "cc_version=$CC_VERSION" >> "$GITHUB_OUTPUT"
+
+          # Node.js 版本
+          if [ -n "${{ github.event.inputs.node_version }}" ]; then
+            NODE_VERSION="${{ github.event.inputs.node_version }}"
+          else
+            NODE_VERSION=$(node --version | sed 's/v//')
+          fi
+          echo "Node version: $NODE_VERSION"
+          echo "node_version=$NODE_VERSION" >> "$GITHUB_OUTPUT"
+
+          # 检查是否已有相同版本的 release
+          if gh release view "v${CC_VERSION}" &>/dev/null; then
+            echo "Release v${CC_VERSION} already exists, skipping."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-macos:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ needs.check-version.outputs.node_version }}
+
+      - name: Download Node.js binary
+        run: |
+          NODE_VERSION="${{ needs.check-version.outputs.node_version }}"
+          ARCH=$(uname -m)
+
+          mkdir -p bundle-darwin/node
+
+          # 下载 Node.js 官方二进制
+          NODE_DIST="node-v${NODE_VERSION}-darwin-${ARCH}"
+          curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_DIST}.tar.gz" -o node.tar.gz
+          tar -xzf node.tar.gz -C bundle-darwin/
+          mv bundle-darwin/${NODE_DIST} bundle-darwin/node-runtime
+
+      - name: Pack Claude Code CLI
+        run: |
+          mkdir -p bundle-darwin/npm-packages
+          CC_VERSION="${{ needs.check-version.outputs.cc_version }}"
+
+          npm pack "@anthropic-ai/claude-code@${CC_VERSION}" --pack-destination bundle-darwin/npm-packages/
+
+          # 同时 pack 所有依赖以支持完全离线安装
+          cd bundle-darwin/npm-packages
+          for pkg in *.tgz; do
+            npm pack --pack-destination . "$(tar -xzf "$pkg" --to-stdout package/package.json | grep -o '"name":"[^"]*"' | head -1 | sed 's/"name":"//;s/"//')" 2>/dev/null || true
+          done
+
+      - name: Download CCSwitch
+        run: |
+          CC_VERSION="${{ needs.check-version.outputs.cc_version }}"
+          mkdir -p bundle-darwin/ccswitch
+
+          # 获取 CCSwitch 最新 release
+          CCSWITCH_URL=$(curl -fsSL "https://api.github.com/repos/farion1231/cc-switch/releases/latest" | \
+            grep -o '"browser_download_url": *"[^"]*macOS[^"]*\.zip"' | head -1 | sed 's/"browser_download_url": *"//;s/"//')
+
+          if [ -n "$CCSWITCH_URL" ]; then
+            curl -fsSL "$CCSWITCH_URL" -o bundle-darwin/ccswitch/cc-switch-macos.zip
+          fi
+
+      - name: Generate manifest
+        run: |
+          cat > bundle-darwin/manifest.json << EOF
+          {
+            "cc_version": "${{ needs.check-version.outputs.cc_version }}",
+            "node_version": "${{ needs.check-version.outputs.node_version }}",
+            "platform": "darwin",
+            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+      - name: Create setup script
+        run: |
+          cat > bundle-darwin/setup.sh << 'SETUPEOF'
+          #!/usr/bin/env bash
+          set -e
+          echo "=== Claude Code Bundle 离线安装 (macOS) ==="
+
+          BUNDLE_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+          # Node.js
+          if ! command -v node &>/dev/null; then
+            echo "Installing Node.js..."
+            cp -R "$BUNDLE_DIR/node-runtime/"* /usr/local/
+          fi
+
+          # Claude Code
+          echo "Installing Claude Code..."
+          npm install -g "$BUNDLE_DIR/npm-packages/"*.tgz
+
+          # CCSwitch
+          if [ -f "$BUNDLE_DIR/ccswitch/cc-switch-macos.zip" ]; then
+            echo "Installing CCSwitch..."
+            unzip -o "$BUNDLE_DIR/ccswitch/cc-switch-macos.zip" -d /Applications/
+          fi
+
+          echo "Done! Run 'claude' to start."
+          SETUPEOF
+          chmod +x bundle-darwin/setup.sh
+
+      - name: Package bundle
+        run: |
+          CC_VERSION="${{ needs.check-version.outputs.cc_version }}"
+          tar -czf "cc-offline-${CC_VERSION}-darwin-x64.tar.gz" -C bundle-darwin .
+          sha256sum "cc-offline-${CC_VERSION}-darwin-x64.tar.gz" > "cc-offline-${CC_VERSION}-darwin-x64.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-darwin
+          path: |
+            cc-offline-*.tar.gz
+            cc-offline-*.tar.gz.sha256
+          retention-days: 30
+
+  build-windows:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ needs.check-version.outputs.node_version }}
+
+      - name: Download Git for Windows
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path bundle-win32/git -Force
+          $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/Git-2.47.1-64-bit.exe"
+          Invoke-WebRequest -Uri $gitUrl -OutFile bundle-win32/git/Git-installer.exe -UseBasicParsing
+
+      - name: Pack Claude Code CLI
+        shell: pwsh
+        run: |
+          $CC_VERSION = "${{ needs.check-version.outputs.cc_version }}"
+          New-Item -ItemType Directory -Path bundle-win32/npm-packages -Force
+          npm pack "@anthropic-ai/claude-code@$CC_VERSION" --pack-destination bundle-win32/npm-packages/
+
+      - name: Download CCSwitch
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path bundle-win32/ccswitch -Force
+          try {
+            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/farion1231/cc-switch/releases/latest" -UseBasicParsing
+            $msiAsset = $release.assets | Where-Object { $_.name -match 'Windows.*\.msi$' } | Select-Object -First 1
+            if ($msiAsset) {
+              Invoke-WebRequest -Uri $msiAsset.browser_download_url -OutFile bundle-win32/ccswitch/cc-switch-windows.msi -UseBasicParsing
+            }
+          } catch {
+            Write-Warning "CCSwitch download skipped: $_"
+          }
+
+      - name: Generate manifest
+        shell: pwsh
+        run: |
+          @{
+            cc_version = "${{ needs.check-version.outputs.cc_version }}"
+            node_version = "${{ needs.check-version.outputs.node_version }}"
+            platform = "win32"
+            build_date = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+          } | ConvertTo-Json | Out-File -FilePath bundle-win32/manifest.json -Encoding UTF8
+
+      - name: Create setup script
+        shell: pwsh
+        run: |
+          @'
+          # Claude Code Bundle 离线安装 (Windows)
+          $ErrorActionPreference = "Stop"
+          Write-Host "=== Claude Code Bundle 离线安装 (Windows) ==="
+
+          $BUNDLE_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+          # Git
+          if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+              Write-Host "Installing Git for Windows..."
+              Start-Process -FilePath "$BUNDLE_DIR\git\Git-installer.exe" -ArgumentList "/VERYSILENT /NORESTART" -Wait
+              $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          }
+
+          # Claude Code
+          Write-Host "Installing Claude Code..."
+          npm install -g "$BUNDLE_DIR\npm-packages\*.tgz"
+
+          # CCSwitch
+          if (Test-Path "$BUNDLE_DIR\ccswitch\cc-switch-windows.msi") {
+              Write-Host "Installing CCSwitch..."
+              Start-Process msiexec.exe -ArgumentList "/i `"$BUNDLE_DIR\ccswitch\cc-switch-windows.msi`" /quiet /norestart" -Wait
+          }
+
+          Write-Host "Done! Run 'claude' to start."
+          '@ | Out-File -FilePath bundle-win32/setup.ps1 -Encoding UTF8
+
+      - name: Package bundle
+        shell: pwsh
+        run: |
+          $CC_VERSION = "${{ needs.check-version.outputs.cc_version }}"
+          Compress-Archive -Path bundle-win32/* -DestinationPath "cc-offline-${CC_VERSION}-win32-x64.zip" -Force
+          $hash = (Get-FileHash "cc-offline-${CC_VERSION}-win32-x64.zip" -Algorithm SHA256).Hash
+          "$hash  cc-offline-${CC_VERSION}-win32-x64.zip" | Out-File "cc-offline-${CC_VERSION}-win32-x64.zip.sha256" -Encoding ascii
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-win32
+          path: |
+            cc-offline-*.zip
+            cc-offline-*.zip.sha256
+          retention-days: 30
+
+  publish:
+    needs: [check-version, build-macos, build-windows]
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Merge artifacts
+        run: |
+          mkdir -p release
+          find artifacts/ -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.sha256" \) -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Generate combined checksums
+        run: |
+          cd release
+          sha256sum *.tar.gz *.zip > checksums.sha256
+          cat checksums.sha256
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check-version.outputs.cc_version }}
+          name: "CC Installer Bundle v${{ needs.check-version.outputs.cc_version }}"
+          body: |
+            ## Claude Code v${{ needs.check-version.outputs.cc_version }} 一键安装 Bundle
+
+            本 Bundle 包含完整离线安装所需的所有组件：
+
+            - Claude Code CLI v${{ needs.check-version.outputs.cc_version }}
+            - Node.js v${{ needs.check-version.outputs.node_version }}
+            - CCSwitch (最新版)
+            - Git for Windows (仅 Windows bundle)
+
+            ### 使用方法
+
+            ```bash
+            # macOS 在线安装
+            curl -fsSL https://raw.githubusercontent.com/DDDDavi4/claude-code-installer-helper/main/install.sh | bash
+
+            # Windows 在线安装 (PowerShell)
+            iwr -Uri "https://raw.githubusercontent.com/DDDDavi4/claude-code-installer-helper/main/install.ps1" -OutFile install.ps1; .\install.ps1
+
+            # 离线安装 (先下载 bundle)
+            bash install.sh --use-bundle ./cc-offline-${{ needs.check-version.outputs.cc_version }}-darwin-x64.tar.gz
+            ```
+          files: release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload to Tencent COS (optional)
+        if: ${{ secrets.TENCENT_SECRET_ID != '' && secrets.TENCENT_SECRET_KEY != '' && secrets.COS_BUCKET != '' }}
+        uses: zkqiang/tencent-cos-action@v0.1.0
+        with:
+          args: upload -r ./release/ cos://${{ secrets.COS_BUCKET }}/ --include "*.tar.gz,*.zip,checksums.sha256"
+        env:
+          SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+        continue-on-error: true
+
+      - name: Update install.sh version constant
+        run: |
+          CC_VERSION="${{ needs.check-version.outputs.cc_version }}"
+          sed -i "s/readonly SCRIPT_VERSION=\".*\"/readonly SCRIPT_VERSION=\"${CC_VERSION}\"/" install.sh
+          sed -i "s/\$Script:SCRIPT_VERSION = \".*\"/\$Script:SCRIPT_VERSION = \"${CC_VERSION}\"/" install.ps1
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add install.sh install.ps1
+          git diff --staged --quiet || git commit -m "chore: bump script version to v${CC_VERSION} [skip ci]"
+          git push
