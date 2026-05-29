@@ -8,6 +8,7 @@ set -euo pipefail
 # --- 常量 ----------------------------------------------------------------
 readonly SCRIPT_VERSION="1.0.0"
 readonly CC_NPM_PACKAGE="@anthropic-ai/claude-code"
+readonly CC_VERSION="2.1.153"
 readonly CCSWITCH_REPO="farion1231/cc-switch"
 readonly NVM_VERSION="0.40.1"
 readonly NODE_MIN_MAJOR=18
@@ -375,8 +376,8 @@ install_claude_code() {
     fi
 
     # 安装
-    info "正在安装 ${CC_NPM_PACKAGE}..."
-    if npm install -g "${CC_NPM_PACKAGE}" 2>&1; then
+    info "正在安装 ${CC_NPM_PACKAGE}@${CC_VERSION}..."
+    if npm install -g "${CC_NPM_PACKAGE}@${CC_VERSION}" 2>&1; then
         INSTALLED_CC=true
         success "Claude Code CLI 安装完成: $(claude --version 2>/dev/null || echo 'version ok')"
     else
@@ -609,6 +610,9 @@ verify_installation() {
         echo -e "$(color "$COLOR_BOLD" '╠════════════════════════════════════════════════╣')"
         echo -e "$(color "$COLOR_BOLD" '║')" "  运行 $(color "$COLOR_YELLOW" 'claude') 开始使用                           $(color "$COLOR_BOLD" '║')"
         echo -e "$(color "$COLOR_BOLD" '║')" "  运行 $(color "$COLOR_YELLOW" 'claude mcp add') 配置 MCP 工具              $(color "$COLOR_BOLD" '║')"
+        echo -e "$(color "$COLOR_BOLD" '╠════════════════════════════════════════════════╣')"
+        echo -e "$(color "$COLOR_BOLD" '║')" "  $(color "$COLOR_RED" '请勿升级! npm update -g 会导致无法使用')           $(color "$COLOR_BOLD" '║')"
+        echo -e "$(color "$COLOR_BOLD" '║')" "  $(color "$COLOR_YELLOW" '版本锁定: claude-code@2.1.153')                  $(color "$COLOR_BOLD" '║')"
         echo -e "$(color "$COLOR_BOLD" '╚════════════════════════════════════════════════╝')"
     else
         warn "部分组件未正确安装。请查看日志: ${LOG_FILE}"

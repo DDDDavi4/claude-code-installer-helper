@@ -17,6 +17,7 @@ $ProgressPreference = "SilentlyContinue"
 # --- 常量 ----------------------------------------------------------------
 $Script:SCRIPT_VERSION = "1.0.0"
 $Script:CC_NPM_PACKAGE = "@anthropic-ai/claude-code"
+$Script:CC_VERSION = "2.1.153"
 $Script:CCSWITCH_REPO = "farion1231/cc-switch"
 $Script:NODE_MIN_MAJOR = 18
 $Script:DISK_SPACE_MIN_MB = 2048
@@ -373,7 +374,7 @@ function Install-ClaudeCode {
     # 安装
     Write-Info "正在安装 $Script:CC_NPM_PACKAGE..."
     try {
-        $output = npm install -g $Script:CC_NPM_PACKAGE 2>&1
+        $output = npm install -g "$Script:CC_NPM_PACKAGE@$Script:CC_VERSION" 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw $output
         }
@@ -606,6 +607,13 @@ function Test-Installation {
         Write-Host "║  运行 " -ForegroundColor Cyan -NoNewline
         Write-Host "cclogin" -ForegroundColor Yellow -NoNewline
         Write-Host " 进行认证                          ║" -ForegroundColor Cyan
+        Write-Host "╠════════════════════════════════════════════════╣" -ForegroundColor Cyan
+        Write-Host "║  " -ForegroundColor Cyan -NoNewline
+        Write-Host "请勿升级! npm update -g 会导致无法使用" -ForegroundColor Red -NoNewline
+        Write-Host "           ║" -ForegroundColor Cyan
+        Write-Host "║  " -ForegroundColor Cyan -NoNewline
+        Write-Host "版本锁定: claude-code@2.1.153" -ForegroundColor Yellow -NoNewline
+        Write-Host "                  ║" -ForegroundColor Cyan
         Write-Host "╚════════════════════════════════════════════════╝" -ForegroundColor Cyan
     } else {
         Write-WarningMsg "部分组件未正确安装。请查看日志: $Script:LOG_FILE"

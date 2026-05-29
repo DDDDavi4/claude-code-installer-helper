@@ -4,6 +4,12 @@
 
 为中文用户设计的 **Claude Code CLI** 一键安装工具。自动处理 Node.js、Git 等前置依赖，自动检测网络环境切换国内镜像，集成 [CCSwitch](https://github.com/farion1231/cc-switch) 接入 DeepSeek V4。
 
+> **固定版本: claude-code@2.1.153**
+>
+> **请勿升级!** 较新版本的 Claude Code CLI 可能与 CCSwitch / DeepSeek V4 路由不兼容。
+> 执行 `npm update -g` 或 `npm install -g @anthropic-ai/claude-code` 会导致版本更新从而**无法使用**。
+> 如不慎升级，请重新运行本安装脚本恢复至 2.1.153。
+
 ## 快速开始
 
 ### macOS / Linux
